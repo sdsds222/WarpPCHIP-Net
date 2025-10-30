@@ -1,76 +1,92 @@
 # WarpPCHIP-Net
 WarpPCHIP-Net integrates RNN memory, convolutional extraction, and PCHIP warping for O(N) long-sequence modeling via serial token processing. Core innovations: non-uniform PCHIP memory (sparse distant for compression, dense recent for detail) and learnable sampling grid. Ideal for language modeling and time-series forecasting.
 
-## Technical Details, Concepts, and Steps
+Here is the direct, "as-is" English translation of the technical summary we developed.
+WarpPCHIP-Net (RNN-H Hybrid Architecture) Technical Points and Detailed Steps
+I. High-Level Concept
+WarpPCHIP-Net is an O(N) (Linear Complexity) long-sequence modeling architecture.
+Its core idea is to establish a "Dual Memory" System:
+ * Working Memory: A standard RNN (like GRU or LSTM) that is responsible for processing the "here and now" input x_k and generating a "current intent" vector h_k.
+ * Long-Term Archive: A continuous function f_H(t) built on PCHIP interpolation. This "archive" is built upon all historical RNN states H = [h_1, ..., h_(k-1)]. It is a lossless, differentiable, and searchable "historical semantic trajectory database."
+At each timestep, the model uses the "Working Memory" (h_k) as a Query to retrieve the information it needs from the "Long-Term Archive" (f_H(t)), then fuses both to make a final prediction.
+II. Core Components
+ * RNN (Controller): A standard RNN unit. Its job is not to remember all of history, but to:
+   * Generate h_k (current intent).
+   * Generate H_history (as the "raw material" for the long-term archive).
+ * PCHIP Continuous Archive (f_H(t)): A mathematical function. It accepts a timestamp t (e.g., t=50.5) and can estimate what the h vector (semantic concept) was at that "moment".
+ * Global Map Module: A fixed-policy sampler. It uses a fixed "far-sparse, near-dense" L-point grid to sample from f_H(t), generating a stable, low-resolution "historical macro-summary" c_global,k.
+ * Dynamic Warped Sampler: A dynamic-policy sampler. It is driven by a "Decision Network (MLP)" which looks at h_k and c_global,k and then actively decides which W "critical points" in f_H(t) to sample at high resolution to fetch the most relevant details h_warped,k.
+III. Detailed Forward Pass Steps (at Timestep k)
+Assume the model is processing the k-th token and has already stored k-1 historical h vectors.
+Stage 1: Generate "Current Intent" (Working Memory)
+ * Input:
+   * x_k (embedding vector of the current token, dimension d)
+   * h_(k-1) (RNN state from the previous step, dimension hidden_dim)
+ * Computation: h_k = RNN(h_(k-1), x_k)
+ * Output: h_k (dimension hidden_dim)
+   * Interpretation: h_k is our "working memory" and "query vector." It represents the state "me, having just seen x_k" and contains the intent of "what information I need now."
+Stage 2: Build "Long-Term Archive" (PCHIP Memory)
+ * Input:
+   * H_history = [h_1, h_2, ..., h_(k-1)] (all past RNN states, dimension (k-1) x hidden_dim)
+   * T = [1, 2, ..., k-1] (corresponding timestamps)
+ * Computation: The PCHIP algorithm constructs d independent continuous curves over T and H_history.
+ * Output: f_H(t) (a continuous function)
+   * Interpretation: This function is now our "historical database." We can query it with any time point t (in the range [1, k-1], including decimals), and it will return an estimated h vector.
+Stage 3: Scan "Global Map" (Macro Context)
+ * Input:
+   * f_H(t) (our "historical database")
+   * L (a fixed thumbnail length, e.g., L=64)
+ * Computation:
+   a.  Generate a fixed L-point non-uniform grid t_grid_L (e.g., using logarithmic spacing, making it dense near k-1 and sparse near 1).
+   b.  Sample these L points on f_H(t): H_thumb,k = f_H(t_grid_L) (result dimension L x hidden_dim)
+   c.  Pass H_thumb,k into a 1D Convolutional Stack (CNN) and a Squeeze-and-Excitation (SE) module.
+   d.  Apply Global Average Pooling to the CNN's output.
+ * Output: c_global,k (a vector, dimension hidden_dim)
+   * Interpretation: c_global,k is a "macro-summary" or "blurry map" of the entire historical semantic trajectory.
+Stage 4: Perform "Dynamic Decision" (Generate Query Coordinates)
+ * Input:
+   * h_k ("current intent" from Stage 1)
+   * c_global,k ("macro map" from Stage 3)
+ * Computation:
+   a.  decision_input = concat(h_k, c_global,k) (concatenate the two vectors, dimension 2 * hidden_dim)
+   b.  theta_k = Decision_MLP(decision_input)
+ * Output: theta_k (a vector, dimension W, e.g., W=128)
+   * Interpretation: theta_k is a "position parameter" vector, representing where the Decision Network thinks the W points of high-value information are approximately located.
+Stage 5: Generate "Warped Sampling Grid" (Precise Positioning)
+ * Input:
+   * theta_k (position parameters from Stage 4)
+   * k-1 (the total length of the current history)
+ * Computation:
+   a.  t_unscaled = sigmoid(theta_k) (normalize the values of theta_k to the [0, 1] range)
+   b.  t_positions = t_unscaled * (k-1) (scale the coordinates to the historical range of [0, k-1])
+   c.  t_warped = sort(t_positions) (sort these W coordinate points to ensure they are monotonically increasing)
+ * Output: t_warped (a W-dimensional vector)
+   * Interpretation: This is the set of W timestamps that the model has actively decided to "precisely look at" in the history. It can contain multiple, discontinuous "dense clusters."
+Stage 6: Execute "High-Resolution Sampling" (Retrieve Details)
+ * Input:
+   * f_H(t) (our "historical database")
+   * t_warped (the W precise coordinates from Stage 5)
+ * Computation:
+   a.  h_warped,k = f_H(t_warped) (Sample the function f_H(t) at these W points. All hidden_dim dimensions use the same t_warped coordinates).
+ * Output: h_warped,k (a W x hidden_dim tensor)
+   * Interpretation: This is the "high-resolution semantic movie" that the model actively retrieved from the "long-term archive." It represents the "historical influence selected by the current word h_k."
+Stage 7: Fuse and Predict (Final Output)
+ * Input:
+   * h_k ("current intent" from Stage 1)
+   * h_warped,k ("retrieved details" from Stage 6)
+ * Computation:
+   a.  h_warped_summary = GlobalAveragePool(h_warped,k) (or use 1D CNN + Pooling to compress W x hidden_dim into 1 x hidden_dim)
+   b.  final_input = concat(h_k, h_warped_summary) (fuse the "current intent" with the "historical summary it retrieved")
+   c.  logits = Prediction_MLP(final_input)
+ * Output: logits (the prediction for the next word)
+   * Interpretation: The model makes its final decision based on both "its current state" and "the information it actively selected from its history."
+Stage 8: Advance (Prepare for Next Step)
+ * Action:
+   a.  The model outputs logits.
+   b.  The system advances to timestep k+1.
+   c.  h_k (the current state) now becomes h_(k-1) (the previous state).
+   d.  h_k is added to the H_history archive, ready to be used in the next loop's Stage 2 to build the new f_H(t).
 
-The following explains the architecture's core concepts and technical details, including the newly added PCHIP non-uniform resolution optimization, and clarifies the magnification mechanism, PCHIP multi-dimensional modeling, convolutional scanning, and sampling-point adjustment. We describe the model's construction and runtime flow step by step, covering concepts and logic only, without any specific code. We emphasize that magnifying key details is achieved by adjusting the positions of sampling points; PCHIP models all dimensions of all historical tokens; the convolutional kernels scan all dimensions on the thumbnail simultaneously; and sampling-point adjustments are synchronized, with one shared scheme across all dimensions.
-
-In addition, we upgrade the warping mechanism to a fully learnable sampling grid: the decision network directly outputs a length W parameter vector (for example, offsets or positions), allowing the network to freely plan the distribution of sampling points rather than relying on a fixed center. This enables end-to-end learning of optimal sampling locations, densifying or sparsifying any historical regions as needed, even magnifying multiple discontinuous areas at once, to better capture complex long-range dependencies. Constraints such as sigmoid normalization to the range [0, k] and soft sorting ensure monotonic increase and ordering of sampling points, avoiding overlap or disorder.
-
-### I. Core Component Concepts
-
-1. RNN Controller: The sequential-memory core that reads inputs step by step and maintains a fixed-size hidden state h_k. This state captures current intent, such as recognizing local patterns in the sequence. The hidden state updates recursively at each time step based on h_{k-1} and the current input x_k, in a form like
-   h_k = RNN(h_{k-1}, x_k),
-   where the RNN can be a GRU or LSTM for improved stability.
-
-2. PCHIP Continuous Memory: Converts the historical embedding sequence E (embeddings of all tokens before the current token k, an N x d tensor, with d dimensions) into a continuous curve f_E(t). Modeling details: PCHIP is applied simultaneously to all d dimensions of all historical tokens, with each dimension's curve built independently to ensure continuity and differentiable sampling for the multi-dimensional history. Specifically, for each dimension j (1 to d), we use historical points (t_i, E_{i,j}) to build a piecewise cubic Hermite polynomial; shape-preserving properties prevent spurious oscillations. New optimization: the base resolution is non-uniform. The distant past is sparse (larger spacing between sampling points to compress far-past information and reduce redundancy and noise), while the recent past is dense (smaller spacing to retain recent detail). This is achieved by applying a nonlinear transform to the time axis t (for example, logarithmic scaling t_scaled = log(t + 1) * scale_factor). PCHIP curves are then constructed on these non-uniform points. Benefits: higher density near the present boosts local accuracy; far-past compression reduces wasted computation, while retaining overall O(N) complexity.
-
-3. Convolutional Thumbnail: A submodule that scans historical macro-patterns to produce a fixed-size map vector c_global,k. Details: from the PCHIP curve we sample a fixed-length thumbnail H_thumb,k of length L (an L x d tensor). Sampling points follow the prior non-uniform scheme (sparse far past, dense recent past) distributed over [0, k], and the thumbnail is dynamically redrawn as k grows to track the latest changes. We then apply a 1D convolutional stack: kernels (size for example 3 or 5) simultaneously scan each dimension of the historical thumbnail, sliding along the L time points while extracting patterns across the d dimensions in parallel, capturing cross-dimensional temporal relations and local correlations (for example, edge detection or periodic motifs). Next, apply a Squeeze-and-Excitation (SE) mechanism: global average pool the thumbnail to get a d-dimensional vector; pass it through a small MLP (two fully connected layers) to compute per-dimension scaling factors (sigmoid); multiply them back dimension-wise to recalibrate features, suppressing noise and amplifying key patterns. Finally, global pooling (average or max) summarizes to a fixed vector c_global,k, representing a macro location and pattern summary of the entire history.
-
-4. Decision Network: Fuses all information to compute warping parameters theta_k. The input is the concatenation of the intent h_k, the map c_global,k, and the current input x_k (total dimension 3 * hidden_dim), processed by an MLP (for example, 2 to 3 fully connected layers, ReLU activations). It directly outputs a length W parameter vector (for example, position offsets delta_t or absolute positions) used to generate the warped grid t_warped. The network has full freedom to plan: through training, it learns optimal distributions, creating dense clusters at any positions (thus magnifying multiple discontinuous key details).
-
-### II. Model Construction Steps
-
-1. Define Inputs and Outputs: Specify embedding dimension d, hidden-state size hidden_dim, fixed thumbnail length L (for example, 64, to keep computation constant), warped-grid length W (for example, 128, as a fixed number of sampling points), and the output dimension (for example, vocabulary size). Ensure all components support multi-dimensional d and non-uniform PCHIP.
-
-2. Build the RNN Module: Configure a standard RNN (for example, GRU) to update the hidden state h_k. The RNN input layer projects x_k (dimension d) to hidden_dim, while h_{k-1} is passed directly; the output layer remains hidden_dim. Optionally add a residual connection (for example, h_k = h_k + h_{k-1}) to alleviate vanishing gradients.
-
-3. Implement PCHIP Memory: Create the continuous curve representation. Steps: collect embeddings E of all historical tokens (N x d); apply a nonlinear transform to the time axis t (from 0 to k-1) to make the far past sparse and the recent past dense (for example, t_scaled[i] = log(i + 1) / log(k) * k, for normalization); for each dimension j, independently but synchronously build the PCHIP curve f_E^j(t): compute Hermite coefficients for each segment, ensuring monotonicity-preserving and differentiability (gradients propagate via linear combinations). The result is a multi-dimensional continuous function that supports vector sampling at arbitrary t (query each dimension in parallel at sampling time).
-
-4. Add the Convolutional Stack: Design a sequence of 1D convolution layers (for example, 2 to 3 Conv1D with kernel size 3, stride 1, padding to keep length L). Emphasis: kernels scan all dimensions of H_thumb,k simultaneously; while sliding along the time axis, they process the d channels to extract spatiotemporal motifs (for example, repeated sequence patterns). Combine with SE: global-average-pool the thumbnail to a d-vector; an MLP (FC to hidden_dim/16 then back to d, sigmoid) outputs d scaling factors; multiply them back dimension-wise. Optional batch normalization can further stabilize training.
-
-5. Set Up the Decision Network: Use an MLP with the concatenated input vector (dimension 3 * hidden_dim); hidden layers can taper (for example, from 2 * hidden_dim down to hidden_dim); output a length W vector theta_k (position parameters). Emphasize free planning: the output directly drives warping, for example
-   t_warped = sort(sigmoid(theta_k) * k),
-   ensuring points lie in [0, k] and are ordered; or treat theta_k as gaps with
-   t_warped = cumsum(softplus(theta_k))
-   to accumulate intervals. Constraints are implemented via differentiable operations to prevent collapse.
-
-6. Integrate Warped Sampling: Define an initial uniform grid t_uniform (length W, evenly spaced over [0, 1]). Warping details: nonlinearly adjust sampling-point positions based on theta_k, for example
-   t_warped[i] = cumsum(exp(theta_k[i])) * (k / sum(exp(theta_k))),
-   enabling arbitrary density distributions (the network learns theta_k to create small intervals at key locations for magnification). Produce an ordered t_warped (length W, within [0, k]). Sample from the PCHIP continuous curve (modeled across all dimensions and benefiting from the non-uniform base resolution) uniformly across dimensions: all d dimensions share the same t_warped scheme, synchronously querying each dimension's curve to obtain high-resolution detail vectors h_warped,k (W x d), with learned high-density positions at multiple locations.
-
-7. Final Prediction Layer: Another MLP fuses the intent h_k and details h_warped,k (flatten h_warped,k or use a 1D conv plus pooling to hidden_dim). Concatenate and pass through two fully connected layers to compute output logits. Optional attention can weight the warped points during fusion.
-
-### III. Forward Pass Flow (Per Time Step)
-
-At each time step k, the model executes the following five phases in a loop, ensuring end-to-end differentiability.
-
-Phase 1: Generate Sequential Intent
-
-* Receive the previous hidden state h_{k-1} and current input embedding x_k (dimension d).
-* Update via the RNN to obtain the new intent vector h_k = RNN(h_{k-1}, x_k), summarizing local context and short-term dependencies.
-
-Phase 2: Produce the Global Map
-
-* From the PCHIP curve (with non-uniform resolution and modeling across all dimensions), sample a fixed-length thumbnail H_thumb,k (L x d), with sampling points spread over [0, k] and dynamically updated as k grows to reflect the latest history.
-* Use the 1D convolutional stack to scan the thumbnail; kernels simultaneously scan each dimension, sliding over the time axis while processing all d dimensions to extract multi-scale patterns.
-* Apply the SE mechanism: global-average-pool to compute a mean feature vector (d-dimensional); a small MLP outputs d scaling factors (sigmoid); adjust the thumbnail dimension-wise to amplify key features and suppress noise.
-* Global pooling (average) yields the map vector c_global,k, representing a macro summary of the history.
-
-Phase 3: Decision and Localization
-
-* Concatenate the intent vector h_k, map vector c_global,k, and current input x_k (total dimension 3 * hidden_dim).
-* Pass through the decision MLP to compute parameters theta_k (length W), with the network freely planning the sampling-point distribution for subsequent warping.
-
-Phase 4: Execute Scaling and High-Resolution Sampling
-
-* Use theta_k to warp the initial uniform grid t_uniform, nonlinearly adjusting sampling-point positions. Based on theta_k, compute gaps or offsets to realize arbitrary densities (for example, small values create dense points to magnify key details; large values create sparse regions). Generate an ordered t_warped (length W, within [0, k]) via cumulative sums or soft sorting.
-* Sample uniformly from the PCHIP continuous curve across dimensions (all-dimension modeling with non-uniform resolution): all d dimensions share the same t_warped scheme, synchronously querying each dimension's curve to obtain high-resolution detail vectors h_warped,k (W x d), where the model-learned positions can be densely clustered at multiple sites.
-
-Phase 5: Final Prediction and Progression
-
-* Fuse the intent h_k and details h_warped,k (flatten or pool h_warped,k), and compute outputs (for example, next-token logits) via the prediction MLP.
-* Advance to the next time step k+1; update the history E by appending x_k.
 
 # Thinking part:
 
@@ -179,73 +195,93 @@ After Logits are used to compute the loss (Loss), the model updates its state an
 4. J_vec_old <- J_vec_new.
 5. Return to **Step 1**.
 
-
 # WarpPCHIP-Net
+
 WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长序列建模与串行token处理。其核心创新：非均匀PCHIP内存（远期稀疏压缩、近期密集细节）和学可学习采样网格（端到端自由多点聚焦）。适用于语言建模和时间序列预测。
 
-## 技术细节、概念和步骤
-
-以下详细讲解架构的核心概念和技术细节，包括新加入的 PCHIP 非均匀分辨率优化，以及对放大机制、PCHIP 多维建模、卷积扫描和采样点调整的澄清。我们分步骤描述模型的构建和运行流程，只交代概念和逻辑，不涉及具体代码实现。重点强调放大关键细节是通过调整采样点位置实现的；PCHIP 针对所有历史 token 的所有维度建模；卷积核在缩略图的每个维度上同时扫描；采样点调整是同步的，所有维度共用一套方案。
-
-此外，我们将扭曲机制优化为完全学可学习的采样网格：决策网络直接输出一个长度 W 的参数向量（例如偏移或位置向量），让网络全权自由规划采样点的分布，而非基于固定中心。这允许模型端到端学习最优采样点位置，能任意密集或稀疏任意历史位置，甚至同时放大多个不连续区域，提高对复杂长依赖的捕捉灵活性。采样点通过约束（如 sigmoid 归一化到 [0, k] 范围并软排序）确保单调递增和有序，避免重叠或混乱。
-
-### I. 核心组件概念
-
-1. **RNN 控制器**：系统的顺序记忆核心，负责逐步读取输入并维护固定大小的隐藏状态 h_k。这个状态捕捉当前意图，例如识别序列中的局部模式。隐藏状态在每个时间步基于上一步 h_{k-1} 和当前输入 x_k 递归更新，公式类似 h_k = RNN(h_{k-1}, x_k)，其中 RNN 可以是 GRU 或 LSTM 以提升稳定性。
-
-2. **PCHIP 连续内存**：将历史嵌入序列 E（所有当前扫描词 k 之前的 token 的嵌入，一个 N x d 张量，d 是维度）转换为连续曲线 f_E(t)。建模细节：针对所有历史 token 的所有 d 个维度同时进行 PCHIP 建模，每个维度独立构造曲线，确保多维历史的连续性和可微分采样。具体过程：对于每个维度 j (1 到 d)，使用历史点 (t_i, E_{i,j}) 构建分段三次埃尔米特多项式，保形性确保曲线不引入额外振荡。新优化：初始分辨率非均匀——远期历史稀疏（采样点间隔大，压缩远期信息以减少冗余和噪声），近期历史密集（采样点间隔小，保留近期细节）。这通过对时间轴 t 应用非线性变换（如对数尺度 t_scaled = log(t + 1) * scale_factor）实现，变换后基于这些非均匀点构建 PCHIP 曲线。好处：近期高密度提升局部精度，远期压缩减少计算浪费，同时保持整体 O(N) 复杂度。
-
-3. **卷积缩略图**：子模块扫描历史宏观模式，生成固定大小的地图向量 c_global,k。细节：从 PCHIP 曲线采样固定长度 L 的缩略图 H_thumb,k（一个 L x d 张量），采样点按照之前远期稀疏、近期密集的调整非均匀分布在 [0, k] 上，随着 k 增长动态局部重绘以捕捉最新变化。然后用一维卷积栈处理：卷积核（大小例如 3 或 5）在历史缩略图的每个维度上同时进行特征扫描——核沿着 L 个时间点滑动，并在 d 个维度上并行提取模式，捕捉跨维度的时序关系和局部相关性（如边缘检测或周期模式）。接着应用挤压-激励机制（SE）：对缩略图进行全局平均池化，得到一个 d 维向量；通过小型 MLP（两层全连接）计算每个维度的缩放因子（sigmoid 激活）；逐维度乘回缩略图以重标定特征，压制噪声并放大关键模式。最后全局池化（平均或最大）汇总成固定向量 c_global,k，代表整个历史的宏观位置信息和模式总结。
-
-4. **决策网络**：融合所有信息，计算扭曲参数 theta_k。输入为意图 h_k、地图 c_global,k 和当前输入 x_k 的拼接（总维度 3 * hidden_dim），通过多层感知机（MLP，例如 2-3 层全连接，ReLU 激活）处理。直接输出一个长度 W 的参数向量（例如位置偏移 delta_t 或直接位置），用于生成扭曲网格 t_warped。网络全权自由规划：模型通过训练学习最优分布，能在任意位置创建密集簇（放大多个不连续关键细节）。
-
-### II. 模型构建步骤
-
-1. **定义输入和输出**：指定嵌入维度 d、隐藏状态大小 hidden_dim、固定缩略图长度 L（例如 64，以保持常量计算）、扭曲网格长度 W（例如 128，作为固定采样点数）和输出维度（例如词汇表大小）。确保所有组件兼容多维 d 和非均匀 PCHIP。
-
-2. **构建 RNN 模块**：设置标准 RNN（如 GRU），用于更新隐藏状态 h_k。RNN 输入层将 x_k（维度 d）投影到 hidden_dim，上一步 h_{k-1} 直接传入；输出层保持 hidden_dim 大小。添加残差连接（如 h_k = h_k + h_{k-1}）可选，以缓解梯度消失。
-
-3. **实现 PCHIP 内存**：创建连续曲线表示。细节步骤：收集所有历史 token 的嵌入 E（N x d）；对时间轴 t (0 到 k-1) 应用非线性变换，使远期稀疏、近期密集（例如 t_scaled[i] = log(i + 1) / log(k) * k，以归一化）；针对每个维度 j 独立但同步构建 PCHIP 曲线 f_E^j(t)：计算每个分段的埃尔米特系数，确保保单调性和可微分（梯度通过线性组合传播）；结果是一个多维连续函数，支持任意 t 的向量采样（采样时对每个维度并行查询）。
-
-4. **添加卷积栈**：设计一维卷积层序列（例如 2-3 层 Conv1D，核大小 3，stride 1，padding 以保持 L）。强调：卷积核在缩略图 H_thumb,k 的每个维度上同时扫描，核滑动时处理所有 d 维度（通道数 d），提取时空模式（如序列中的重复 motif）。结合挤压-激励：全局平均池化缩略图得到 d 维向量；MLP（FC 到 hidden_dim/16 再回 d，sigmoid）计算 d 个缩放因子；逐维度乘回特征。添加批归一化可选，以稳定训练。
-
-5. **设置决策网络**：使用多层感知机（MLP），输入拼接向量（维度 3 * hidden_dim），隐藏层大小递减（例如 hidden_dim * 2 到 hidden_dim），输出长度 W 的向量 theta_k（位置参数）。强调自由规划：输出向量直接用于扭曲，例如 t_warped = sort(sigmoid(theta_k) * k)，确保点在 [0, k] 内有序；或 theta_k 作为偏移，t_warped = cumsum(softplus(theta_k)) 以累积间隔。约束通过可微操作实现，防止塌缩。
-
-6. **整合扭曲采样**：定义初始均匀网格 t_uniform（长度 W，均匀在 [0, 1]）。扭曲细节：基于 theta_k（W 维向量）非线性调整采样点位置，例如 t_warped[i] = cumsum(exp(theta_k[i])) * (k / sum(exp(theta_k)))，实现任意密度分布（网络学习 theta_k 以在关键处创建小间隔，实现放大）；生成扭曲网格 t_warped（长度 W，有序）；从 PCHIP 曲线采样，得到 h_warped,k（W x d）。强调：调整采样点是同步的，所有 d 维度共用一套采样方案（同一 t_warped 网格应用于所有维度），确保一致性和效率；自由规划允许多个密集簇，同时放大不连续细节。
-
-7. **最终预测层**：另一个 MLP 融合意图 h_k 和细节 h_warped,k（先对 h_warped,k 展平或一维卷积池化到 hidden_dim），输入拼接后通过 2 层全连接计算输出 logits。添加注意力可选，以加权融合 warped 点。
-
-### III. 前向传播流程步骤（每个时间步）
-
-模型在每个时间步 k 执行以下五个阶段的循环，确保端到端可微分：
-
-#### 阶段 1：生成顺序意图
-
-- 接收上一步隐藏状态 h_{k-1} 和当前输入嵌入 x_k（维度 d）。
-- 通过 RNN 更新计算新意图向量 h_k = RNN(h_{k-1}, x_k)，总结局部上下文和短期依赖。
-
-#### 阶段 2：生成全局地图
-
-- 从 PCHIP 曲线（非均匀分辨率，所有维度建模）采样固定长度 L 的历史缩略图 H_thumb,k（L x d），采样点均匀在 [0, k]，随着 k 增长动态更新以反映最新历史。
-- 使用一维卷积栈扫描缩略图，卷积核在每个维度上同时进行特征扫描，滑动覆盖时间轴并处理所有 d 维度，提取多尺度模式。
-- 应用挤压-激励机制：全局平均池化计算平均特征向量（d 维）；小型 MLP 输出 d 个缩放因子（sigmoid）；逐维度调整缩略图以放大关键特征、压制噪声。
-- 全局池化（平均）得到地图向量 c_global,k，代表历史宏观总结。
-
-#### 阶段 3：决策与定位
-
-- 拼接意图向量 h_k、地图向量 c_global,k 和当前输入 x_k（总维度 3 * hidden_dim）。
-- 通过决策 MLP 计算参数 theta_k（W 维向量），网络自由规划采样点分布，用于后续扭曲。
-
-#### 阶段 4：执行缩放与高分辨率采样
-
-- 使用决策参数 theta_k 扭曲初始均匀网格 t_uniform，非线性调整采样点位置：基于 theta_k 计算间隔或偏移，实现任意密度（例如小 theta_k 值创建密集点，放大关键细节；大值创建稀疏）；通过累积和或软排序生成有序 t_warped（长度 W，在 [0, k] 内）。
-- 从 PCHIP 连续曲线（所有维度建模，受益于非均匀分辨率）统一采样：所有 d 维度共用同一 t_warped 方案，同步查询每个维度曲线，得到高分辨率细节向量 h_warped,k（W x d），在模型学习的多个位置信息密度高。
-- 
-
-#### 阶段 5：最终预测与推进
-
-- 融合意图 h_k 和细节 h_warped,k（展平或池化 h_warped,k），通过预测 MLP 计算输出（例如下一个词的 logits）。
-- 推进到下一时间步 k+1，开始新循环，历史 E 更新为 E + x_k。
+一、概念
+WarpPCHIP-Net 是一种 O(N)（线性复杂度）的长序列建模架构。
+其核心思想是建立一个**“双记忆”系统**：
+ * 工作记忆 (Working Memory): 一个标准的 RNN（如 GRU 或 LSTM），它负责处理“此时此刻”的输入 x_k，并生成一个“当前意图”向量 h_k。
+ * 长期档案 (Long-Term Archive): 一个基于 PCHIP 插值构建的连续函数 f_H(t)。这个“档案”是建立在所有历史 RNN 状态 H = [h_1, ..., h_(k-1)] 之上的，它是一个无损的、可微分的、可搜索的“历史语义轨迹数据库”。
+在每个时间步，模型使用“工作记忆”(h_k) 作为查询（Query），去“长期档案”(f_H(t)) 中检索它需要的信息，然后将两者融合以做出最终预测。
+二、核心组件
+ * RNN (控制器): 一个标准的 RNN 单元。它的工作不是记住所有历史，而是：
+   * 生成 h_k（当前意图）。
+   * 生成 H_history（作为长期档案的“原材料”）。
+ * PCHIP 连续档案 (f_H(t)): 一个数学函数。它接收一个时间戳 t (例如 t=50.5)，并能估算出在那个“时刻”的 h 向量（语义概念）是什么样子的。
+ * 全局地图模块 (Global Map Module): 一个固定策略的采样器。它使用一个固定的“远稀疏、近密集”的 L 点网格，从 f_H(t) 中采样，生成一个稳定的、低分辨率的“历史宏观摘要” c_global,k。
+ * 动态扭曲采样器 (Dynamic Warped Sampler): 一个动态策略的采样器。它由一个“决策网络 (MLP)”驱动，该网络会查看 h_k 和 c_global,k，然后主动决定应该去 f_H(t) 的哪 W 个“关键点”进行高分辨率采样，以获取最相关的细节 h_warped,k。
+三、详细的前向传播步骤 (在时间步 k)
+假设模型正在处理第 k 个 token，并且已经存储了 k-1 个历史 h 向量。
+阶段 1：生成“当前意图” (工作记忆)
+ * 输入：
+   * x_k (当前 token 的嵌入向量, 维度 d)
+   * h_(k-1) (上一步的 RNN 状态, 维度 hidden_dim)
+ * 计算： h_k = RNN(h_(k-1), x_k)
+ * 输出： h_k (维度 hidden_dim)
+   * 解读： h_k 是我们的“工作记忆”和“查询向量”。它代表了“刚刚看到了 x_k 之后的我”这个状态，并包含了“我现在需要什么信息”的意图。
+阶段 2：构建“长期档案” (PCHIP 内存)
+ * 输入：
+   * H_history = [h_1, h_2, ..., h_(k-1)] (所有过去的 RNN 状态，维度 (k-1) x hidden_dim)
+   * T = [1, 2, ..., k-1] (对应的时间戳)
+ * 计算： PCHIP 算法在 T 和 H_history 上构建 d 个独立的连续曲线。
+ * 输出： f_H(t) (一个连续函数)
+   * 解读： 这个函数现在是我们的“历史数据库”。我们可以用任意时间点 t (在 [1, k-1] 范围内，包括小数) 来查询它，它会返回一个估算的 h 向量。
+阶段 3：扫描“全局地图” (宏观上下文)
+ * 输入：
+   * f_H(t) (我们的“历史数据库”)
+   * L (一个固定的缩略图长度, e.g., L=64)
+ * 计算：
+   a.  生成一个固定的 L 点非均匀网格 t_grid_L (例如，使用对数间隔，使其在 k-1 附近密集，在 1 附近稀疏)。
+   b.  在 f_H(t) 上采样这 L 个点：H_thumb,k = f_H(t_grid_L) (结果维度 L x hidden_dim)
+   c.  将 H_thumb,k 传入一个 1D 卷积栈 (CNN) 和挤压-激励 (SE) 模块。
+   d.  对 CNN 的输出进行全局平均池化 (Global Average Pooling)。
+ * 输出： c_global,k (一个向量, 维度 hidden_dim)
+   * 解读： c_global,k 是对整个历史语义轨迹的“宏观总结”或“模糊地图”。
+阶段 4：执行“动态决策” (生成查询坐标)
+ * 输入：
+   * h_k (来自阶段 1 的“当前意图”)
+   * c_global,k (来自阶段 3 的“宏观地图”)
+ * 计算：
+   a.  decision_input = concat(h_k, c_global,k) (拼接两个向量，维度 2 * hidden_dim)
+   b.  theta_k = Decision_MLP(decision_input)
+ * 输出： theta_k (一个向量, 维度 W, e.g., W=128)
+   * 解读： theta_k 是一个“位置参数”向量，它代表了决策网络“认为” W 个高价值信息点大致在哪里。
+阶段 5：生成“扭曲采样网格” (精确定位)
+ * 输入：
+   * theta_k (来自阶段 4 的位置参数)
+   * k-1 (当前历史的总长度)
+ * 计算：
+   a.  t_unscaled = sigmoid(theta_k) (将 theta_k 的值归一化到 [0, 1] 范围)
+   b.  t_positions = t_unscaled * (k-1) (将坐标缩放到 [0, k-1] 的历史范围)
+   c.  t_warped = sort(t_positions) (对这 W 个坐标点进行排序，确保它们单调递增)
+ * 输出： t_warped (一个 W 维向量)
+   * 解读： 这是模型最终主动决定要去历史中“精确查看”的 W 个时间戳。它可以包含多个不连续的“密集簇”。
+阶段 6：执行“高分辨率采样” (检索细节)
+ * 输入：
+   * f_H(t) (我们的“历史数据库”)
+   * t_warped (来自阶段 5 的 W 个精确坐标)
+ * 计算：
+   a.  h_warped,k = f_H(t_warped) (在 f_H(t) 上采样这 W 个点。所有 hidden_dim 维度都使用相同的 t_warped 坐标)。
+ * 输出： h_warped,k (一个 W x hidden_dim 的张量)
+   * 解读： 这是模型从“长期档案”中主动检索回来的“高分辨率语义电影”。它代表了“当前词 h_k 所选择的历史影响”。
+阶段 7：融合与预测 (最终输出)
+ * 输入：
+   * h_k (来自阶段 1 的“当前意图”)
+   * h_warped,k (来自阶段 6 的“检索到的细节”)
+ * 计算：
+   a.  h_warped_summary = GlobalAveragePool(h_warped,k) (或者用 1D CNN + Pooling 将 W x hidden_dim 压缩成 1 x hidden_dim)
+   b.  final_input = concat(h_k, h_warped_summary) (融合“当前意图”和“它检索到的历史摘要”)
+   c.  logits = Prediction_MLP(final_input)
+ * 输出： logits (对下一个词的预测)
+   * 解读： 模型基于“它现在的状态”和“它主动从历史中选择的信息”共同做出最终决定。
+阶段 8：推进 (为下一步做准备)
+ * 动作：
+   a.  模型输出 logits。
+   b.  系统推进到时间步 k+1。
+   c.  h_k (当前状态) 现在变成了 h_(k-1) (上一步状态)。
+   d.  h_k 被添加进 H_history 档案库，准备在下一个循环的阶段 2 中被用于构建新的 
 
 # 设想部分 Thinking part:
 
