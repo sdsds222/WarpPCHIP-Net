@@ -72,6 +72,114 @@ Phase 5: Final Prediction and Progression
 * Fuse the intent h_k and details h_warped,k (flatten or pool h_warped,k), and compute outputs (for example, next-token logits) via the prediction MLP.
 * Advance to the next time step k+1; update the history E by appending x_k.
 
+# Thinking part:
+
+### Architecture Technical Summary: Hybrid Sequence Model with Continuous Interpolation and State Compression
+
+This architecture is a hybrid sequence model designed to achieve dynamic, sparse access to long-range dependencies under O(N) linear computational complexity.
+
+It processes local context via a stateful sequential controller (i.e., W-Head) and handles non-local, sparse global context via a stateless dynamic read head (i.e., R-Head).
+
+#### I. Core Components (Static Definition)
+
+1. **Stateful Controller (RNN_ctrl):**
+   * **Definition:** A recurrent neural network (e.g., GRU or LSTM) serving as the system's backbone.
+   * **Responsibilities:** 1. Sequentially process the input sequence e_k. 2. Maintain a hidden state h_k that encodes dense sequential history. 3. Act as the "decision center" for all sub-modules.
+
+2. **Continuous Memory Modules:**
+   * **E (Embedding Matrix):** An N x d_model discrete embedding matrix.
+   * **H (Heatmap Vector):** An N x 1 discrete heat (access) vector.
+   * **f_E(t) (Content Interpolator):** A differentiable interpolation function based on E (e.g., PCHIP). Input a continuous scalar t (e.g., t=4.2), output a d_model-dimensional interpolated vector e_read.
+   * **f_H(t) (Heat Interpolator):** A differentiable interpolation function based on H. Input t, output a scalar h_read.
+
+3. **O(1) State Caches:**
+   * **C_vec (Content Cache):** A d_model-dimensional vector. Recursively compresses all content e_read read by R-Head via EMA (Exponential Moving Average).
+   * **J_vec (Action Cache):** A d_action-dimensional vector. Recursively compresses all actions j_t executed by R-Head via EMA.
+
+4. **Auxiliary Processors (MLPs):**
+   * **ActionEncoder (MLP):**
+     * **Input:** [t_R, D] (R-Head's absolute position t_R and relative distance D = k - t_R).
+     * **Output:** j_t (d_action-dimensional action embedding) for updating J_vec.
+   * **JumpController (MLP):**
+     * **Input:** concat(h_k, C_vec_old, J_vec_old). (C_vec_old and J_vec_old represent the caches from the previous step).
+     * **Output:** t_R (next continuous jump position).
+   * **OutputPredictor (MLP):**
+     * **Input:** concat(h_k, e_read, h_read, D, ...).
+     * **Output:** Logits (log probabilities over the vocabulary).
+
+#### II. Computation Graph (Dynamic Flow)
+
+This is the detailed forward propagation (Forward Pass) when the model processes the **k-th timestep**. Assume M R-Head jumps (for simplicity, the following describes the case for M=1).
+
+##### Step 1: Sequential State Update
+
+1. The controller RNN_ctrl receives its hidden state h_(k-1) from the previous timestep and the current position's word embedding e_k (directly read from E[k]).
+2. RNN_ctrl computes and outputs its current timestep's hidden state h_k.
+   * h_k = RNN_ctrl(h_(k-1), e_k)
+   * h_k now encodes all dense sequential context up to k.
+
+##### Step 2: R-Head Policy Execution
+
+1. JumpController is activated to decide R-Head's target position.
+2. It collects all available historical context:
+   * h_k (from Step 1)
+   * C_vec_old (from R-Head content cache at step k-1)
+   * J_vec_old (from R-Head action cache at step k-1)
+3. JumpController outputs a continuous scalar t_R:
+   * policy_input = concat(h_k, C_vec_old, J_vec_old)
+   * t_R = sigmoid(MLP_jump(policy_input)) * k
+   * (Sigmoid is used to constrain t_R to the left of W-Head, i.e., in the [0, k] range).
+
+##### Step 3: Differentiable Memory Access
+
+1. R-Head executes the jump to target t_R (e.g., t_R = 4.2).
+2. The model reads data from continuous memory via interpolators f_E and f_H:
+   * `e_read = f_E(t_R)` (interpolated from E[4] and E[5] to obtain a d_model-dimensional vector)
+   * `h_read = f_H(t_R)` (interpolated from H[4] and H[5] to obtain a scalar)
+
+##### Step 4: Predictive Output Generation
+
+1. OutputPredictor collects all available contextual information to make the final prediction:
+   * h_k (dense sequential context)
+   * e_read (sparse content read back by R-Head)
+   * h_read (heat read back by R-Head)
+   * D = k - t_R (relative distance)
+   * C_vec_old (R-Head's historical content)
+   * J_vec_old (R-Head's historical actions)
+2. OutputPredictor computes Logits for predicting the (k+1)-th word:
+   * predict_input = concat(h_k, e_read, h_read, D, C_vec_old, J_vec_old)
+   * Logits = MLP_predict(predict_input)
+
+##### Step 5: State and Memory Update
+
+After Logits are used to compute the loss (Loss), the model updates its state and memory for the next step (k+1). These three updates can be performed in parallel:
+
+1. **Update Content Cache (C_vec):**
+   * C_vec_new <- beta * C_vec_old + (1 - beta) * e_read
+   * (beta is the EMA forgetting factor, e.g., 0.8). This is an O(d) operation.
+
+2. **Update Action Cache (J_vec):**
+   * j_t = ActionEncoder([t_R, D]) (MLP, O(d^2) operation)
+   * J_vec_new <- alpha * J_vec_old + (1 - alpha) * j_t
+   * (alpha is the EMA forgetting factor, e.g., 0.9). This is an O(d) operation.
+
+3. **Update Heatmap (H):**
+   * This is a differentiable write operation.
+   * The model assigns a heat increment delta_h to t_R (e.g., delta_h = 1).
+   * delta_h is linearly distributed to the adjacent integer indices of t_R.
+   * For example, for t_R = 4.2:
+     * H[4] <- H[4] + (1 - 0.2) * delta_h
+     * H[5] <- H[5] + (0.2) * delta_h
+
+##### Step 6: Advance
+
+1. W-Head index k increments to k+1.
+2. h_(k-1) <- h_k.
+3. C_vec_old <- C_vec_new.
+4. J_vec_old <- J_vec_new.
+5. Return to **Step 1**.
+
+
 # WarpPCHIP-Net
 WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长序列建模与串行token处理。其核心创新：非均匀PCHIP内存（远期稀疏压缩、近期密集细节）和学可学习采样网格（端到端自由多点聚焦）。适用于语言建模和时间序列预测。
 
