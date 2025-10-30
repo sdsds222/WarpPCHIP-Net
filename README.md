@@ -144,7 +144,7 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
 
 ### 架构技术总结：连续插值与状态压缩的混合序列模型
 
-本架构是一个**混合序列模型 (Hybrid Sequence Model)**，其设计目标是**在 O(N) 的线性计算复杂度下，实现对长距离依赖的动态、稀疏访问**。
+本架构是一个混合序列模型 (Hybrid Sequence Model)，其设计目标是在 O(N) 的线性计算复杂度下，实现对长距离依赖的动态、稀疏访问。
 
 它通过一个**有状态的顺序控制器 (Stateful Sequential Controller)**（即 W-Head）来处理局部上下文，并辅以一个**无状态的动态读取头 (Stateless Dynamic Read Head)**（即 R-Head）来处理非局部的、稀疏的全局上下文。
 
@@ -174,8 +174,6 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
     * **OutputPredictor (MLP):**
         * **输入:** concat(h_k, e_read, h_read, D, ...)。
         * **输出:** Logits (词汇表的对数概率)。
-
----
 
 #### 二、 计算图（动态流程）
 
