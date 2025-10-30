@@ -183,7 +183,7 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
 
 1.  控制器 RNN_ctrl 接收其**上一时刻的隐藏状态 h_(k-1)** 和**当前位置的词嵌入 e_k**（从 E[k] 直接读取）。
 2.  RNN_ctrl 计算并输出其**当前时刻的隐藏状态 h_k**。
-    * `h_k = RNN_ctrl(h_(k-1), e_k)`
+    * h_k = RNN_ctrl(h_(k-1), e_k)
     * h_k 现在编码了到 k 为止的**所有稠密顺序上下文**。
 
 ##### 步骤 2: R-Head 策略执行 (Read Head Policy Execution)
@@ -194,8 +194,8 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
     * C_vec_old (来自 k-1 步的 R-Head 内容缓存)
     * J_vec_old (来自 k-1 步的 R-Head 动作缓存)
 3.  JumpController 输出一个连续标量 t_R：
-    * `policy_input = concat(h_k, C_vec_old, J_vec_old)`
-    * `t_R = sigmoid(MLP_jump(policy_input)) * k`
+    * policy_input = concat(h_k, C_vec_old, J_vec_old)
+    * t_R = sigmoid(MLP_jump(policy_input)) * k
     * (使用 sigmoid 将 t_R 约束在 W-Head 的左侧，即 [0, k] 范围内)。
 
 ##### 步骤 3: 可微分内存访问 (Differentiable Memory Access)
@@ -215,20 +215,20 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
     * C_vec_old (R-Head 的历史内容)
     * J_vec_old (R-Head 的历史动作)
 2.  OutputPredictor 计算 Logits，用于预测第 k+1 个词：
-    * `predict_input = concat(h_k, e_read, h_read, D, C_vec_old, J_vec_old)`
-    * `Logits = MLP_predict(predict_input)`
+    * predict_input = concat(h_k, e_read, h_read, D, C_vec_old, J_vec_old)
+    * Logits = MLP_predict(predict_input)
 
 ##### 步骤 5: 状态与内存更新 (State and Memory Update)
 
 在 Logits 被用于计算损失（Loss）之后，模型为**下一步（k+1）**更新其状态和内存。这三项更新可以**并行执行**：
 
 1.  **更新内容缓存 (C_vec):**
-    * `C_vec_new <- beta * C_vec_old + (1 - beta) * e_read`
+    * C_vec_new <- beta * C_vec_old + (1 - beta) * e_read
     * (beta 是 EMA 遗忘因子, 例如 0.8)。这是一个 O(d) 的操作。
 
 2.  **更新动作缓存 (J_vec):**
-    * `j_t = ActionEncoder([t_R, D])` (MLP, O(d^2) 操作)
-    * `J_vec_new <- alpha * J_vec_old + (1 - alpha) * j_t`
+    * j_t = ActionEncoder([t_R, D]) (MLP, O(d^2) 操作)
+    * J_vec_new <- alpha * J_vec_old + (1 - alpha) * j_t
     * (alpha 是 EMA 遗忘因子, 例如 0.9)。这是一个 O(d) 的操作。
 
 3.  **更新热度地图 (H):**
@@ -236,15 +236,15 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
     * 模型为 t_R 分配一个热度增量 delta_h (例如 delta_h = 1)。
     * delta_h 被按线性比例分配给 t_R 相邻的整数索引。
     * 例如，对于 t_R = 4.2：
-        * `H[4] <- H[4] + (1 - 0.2) * delta_h`
-        * `H[5] <- H[5] + (0.2) * delta_h`
+        * H[4] <- H[4] + (1 - 0.2) * delta_h
+        * H[5] <- H[5] + (0.2) * delta_h
 
 ##### 步骤 6: 推进 (Advance)
 
 1.  W-Head 索引 k 增加到 k+1。
-2.  `h_(k-1) <- h_k`。
-3.  `C_vec_old <- C_vec_new`。
-4.  `J_vec_old <- J_vec_new`。
+2.  h_(k-1) <- h_k。
+3.  C_vec_old <- C_vec_new。
+4.  J_vec_old <- J_vec_new。
 5.  返回**步骤 1**。
 
 
