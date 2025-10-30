@@ -144,20 +144,20 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
 
 ### 架构技术总结：连续插值与状态压缩的混合序列模型
 
-本架构是一个混合序列模型 (Hybrid Sequence Model)，其设计目标是在 O(N) 的线性计算复杂度下，实现对长距离依赖的动态、稀疏访问。
+本架构是一个混合序列模型，其设计目标是在 O(N) 的线性计算复杂度下，实现对长距离依赖的动态、稀疏访问。
 
-它通过一个**有状态的顺序控制器 (Stateful Sequential Controller)**（即 W-Head）来处理局部上下文，并辅以一个**无状态的动态读取头 (Stateless Dynamic Read Head)**（即 R-Head）来处理非局部的、稀疏的全局上下文。
+它通过一个有状态的顺序控制器 （即 W-Head）来处理局部上下文，并辅以一个无状态的动态读取头（即 R-Head）来处理非局部的、稀疏的全局上下文。
 
 #### 一、 核心组件（静态定义）
 
 1.  **有状态控制器 (Stateful Controller - RNN_ctrl):**
-    * **定义:** 一个循环神经网络（如 GRU 或 LSTM），作为系统的**主干（Backbone）**。
+    * **定义:** 一个循环神经网络（如 GRU 或 LSTM），作为系统的主干。
     * **职责:** 1. 顺序处理输入序列 e_k。 2. 维护一个编码了稠密顺序历史的隐藏状态 h_k。 3. 作为所有子模块的“决策中心”。
 
 2.  **连续内存模块 (Continuous Memory Modules):**
     * **E (Embedding Matrix):** N x d_model 的离散嵌入矩阵。
     * **H (Heatmap Vector):** N x 1 的离散热度（访问）向量。
-    * **f_E(t) (内容插值器):** 一个基于 E 的**可微分插值函数**（例如 PCHIP）。输入一个连续标量 t (例如 t=4.2)，输出一个 d_model 维的插值向量 e_read。
+    * **f_E(t) (内容插值器):** 一个基于 E 的可微分插值函数（例如 PCHIP）。输入一个连续标量 t (例如 t=4.2)，输出一个 d_model 维的插值向量 e_read。
     * **f_H(t) (热度插值器):** 一个基于 H 的可微分插值函数。输入 t，输出一个标量 h_read。
 
 3.  **O(1) 状态缓存 (State Caches):**
@@ -181,10 +181,10 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
 
 ##### 步骤 1: 顺序状态更新 (Sequential State Update)
 
-1.  控制器 RNN_ctrl 接收其**上一时刻的隐藏状态 h_(k-1)** 和**当前位置的词嵌入 e_k**（从 E[k] 直接读取）。
-2.  RNN_ctrl 计算并输出其**当前时刻的隐藏状态 h_k**。
+1.  控制器 RNN_ctrl 接收其上一时刻的隐藏状态 h_(k-1)和当前位置的词嵌入 e_k（从 E[k] 直接读取）。
+2.  RNN_ctrl 计算并输出其当前时刻的隐藏状态 h_k。
     * h_k = RNN_ctrl(h_(k-1), e_k)
-    * h_k 现在编码了到 k 为止的**所有稠密顺序上下文**。
+    * h_k 现在编码了到 k 为止的所有稠密顺序上下文。
 
 ##### 步骤 2: R-Head 策略执行 (Read Head Policy Execution)
 
@@ -220,7 +220,7 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
 
 ##### 步骤 5: 状态与内存更新 (State and Memory Update)
 
-在 Logits 被用于计算损失（Loss）之后，模型为**下一步（k+1）**更新其状态和内存。这三项更新可以**并行执行**：
+在 Logits 被用于计算损失（Loss）之后，模型为下一步（k+1）更新其状态和内存。这三项更新可以并行执行：
 
 1.  **更新内容缓存 (C_vec):**
     * C_vec_new <- beta * C_vec_old + (1 - beta) * e_read
@@ -232,7 +232,7 @@ WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长
     * (alpha 是 EMA 遗忘因子, 例如 0.9)。这是一个 O(d) 的操作。
 
 3.  **更新热度地图 (H):**
-    * 这是一个**可微分写入 (Differentiable Write)** 或 **“溅射” (Splatting)** 操作。
+    * 这是一个可微分写入操作。
     * 模型为 t_R 分配一个热度增量 delta_h (例如 delta_h = 1)。
     * delta_h 被按线性比例分配给 t_R 相邻的整数索引。
     * 例如，对于 t_R = 4.2：
