@@ -195,6 +195,32 @@ After Logits are used to compute the loss (Loss), the model updates its state an
 4. J_vec_old <- J_vec_new.
 5. Return to **Step 1**.
 
+### Supplementary Mechanism: Iterative Refinement
+
+#### 1. Motivation for Optimization: Single-Pass Vulnerability
+
+A "Single-Pass" sampling mechanism has a logical vulnerability. This mechanism assumes the "Decision Network" (Stage 4) can precisely hit all $W$ critical points on its first attempt, based solely on the "Global Map" (`c_global,k`).
+
+* Problem: "Fuzzy focusing" during initial training (e.g., sampling `t=50.3` instead of `t=50.0`) will lead to retrieving sub-optimal or "contaminated" information.
+* Consequence: With no "second chance," the model is forced to predict based on this flawed information. This causes noisy and unstable gradient signals, making it extremely difficult for the "Decision Network" to converge (i.e., an "all-or-nothing" learning dilemma).
+
+#### 2. Optimization Mechanism: Iterative Refinement
+
+To solve this, we introduce an "Iterative Refinement" or "Coarse-to-Fine" search mechanism. This mechanism adds an "internal loop" or "multi-stage decision" within the *same* timestep $k$.
+
+The detailed steps are as follows:
+
+1.  Pass 1: Coarse Look
+    * Input: `Decision_Network_1` receives the initial `concat(h_k, c_global,k)`.
+    * Output: Generates a "coarse" sampling result, `h_warped_pass_1`.
+    * *(This result is not used for the final prediction, only as "intermediate context" for the next step)*
+2.  Pass 2: Refined Look
+    * Input: `Decision_Network_2` receives a more information-dense input: `concat(h_k, h_warped_pass_1)`.
+    * [Key]: `Decision_Network_2` now makes a "secondary decision" or "self-correction" based on the *result of the first look* (`h_warped_pass_1`).
+    * Output: Generates a more refined and accurate sampling result, `h_warped_pass_2`.
+3.  Final Prediction
+    * In the final prediction stage, the model uses this "refined" `h_warped_pass_2` for fusion and prediction.
+
 # WarpPCHIP-Net
 
 WarpPCHIP Net 融合RNN记忆、卷积提取及PCHIP扭曲采样，实现O(N)长序列建模与串行token处理。其核心创新：非均匀PCHIP内存（远期稀疏压缩、近期密集细节）和学可学习采样网格（端到端自由多点聚焦）。适用于语言建模和时间序列预测。
@@ -391,4 +417,29 @@ WarpPCHIP-Net 是一种 O(N)（线性复杂度）的长序列建模架构。
 4.  J_vec_old <- J_vec_new。
 5.  返回**步骤 1**。
 
+### 补充机制：迭代式精炼 (Iterative Refinement)
+
+#### 1. 优化的动机：单次传递的脆弱性
+
+一个“单次传递” (Single-Pass) 的采样机制存在逻辑上的脆弱性。该机制假设“决策网络”（阶段 4）能仅凭“全局地图” (`c_global,k`) 就在第一次尝试时精确命中所有 $W$ 个关键点。
+
+* 问题： 训练初期的“模糊聚焦”（例如，采样 `t=50.3` 而非 `t=50.0`）会导致检索到“次优”或“被污染”的信息。
+* 后果： 由于没有“第二次机会”，模型被迫基于此错误信息进行预测。这会导致梯度信号嘈杂且不稳定，使“决策网络”极难收敛（即“全有或全无”的学习困境）。
+
+#### 2. 优化机制：迭代式精炼
+
+为解决此问题，我们引入“迭代式精炼”或“粗到精” (Coarse-to-Fine) 的搜索机制。此机制在同一个时间步 $k$ 内引入了一个“内部循环”或“多阶段决策”。
+
+详细步骤如下：
+
+1.  传递 1：粗略查看 (Pass 1: Coarse Look)
+    * 输入： `决策网络_1` 接收初始的 `concat(h_k, c_global,k)`。
+    * 输出： 生成一个“粗略”的采样结果 `h_warped_pass_1`。
+    * *（此结果不用于最终预测，仅作为下一步的“中间上下文”）*
+2.  传递 2：精细聚焦 (Pass 2: Refined Look)
+    * 输入： `决策网络_2` 接收一个信息密度更高的输入：`concat(h_k, h_warped_pass_1)`。
+    * 【关键】： `决策网络_2` 现在是基于第一次查看的结果 (`h_warped_pass_1`) 来进行“二次决策”或“自我修正”。
+    * 输出： 生成一个更精细、更准确的采样结果 `h_warped_pass_2`。
+3.  最终预测 (Final Prediction)
+    * 在最终预测阶段，模型使用这个经过“精炼”的 `h_warped_pass_2` 来进行融合与预测。
 
