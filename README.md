@@ -220,6 +220,10 @@ The detailed steps are as follows:
     * Output: Generates a more refined and accurate sampling result, `h_warped_pass_2`.
 3.  Final Prediction
     * In the final prediction stage, the model uses this "refined" `h_warped_pass_2` for fusion and prediction.
+#### **Tip – Coord channels for CNN**
+
+When scanning the PCHIP thumbnail, concat simple coordinate features (e.g., `i/L`, relative age `(k-1 - t_grid[i])/(k-1)`, or sinusoidal bases) to the CNN input. This breaks translation invariance, exposes **position/newness/density**, and stabilizes hotspot localization for the downstream warped sampling.
+
 
 # WarpPCHIP-Net
 
@@ -443,3 +447,6 @@ WarpPCHIP-Net 是一种 O(N)（线性复杂度）的长序列建模架构。
 3.  最终预测 (Final Prediction)
     * 在最终预测阶段，模型使用这个经过“精炼”的 `h_warped_pass_2` 来进行融合与预测。
 
+#### CNN 加坐标通道
+
+在扫描 PCHIP 缩略图时，把简单的坐标特征拼接进卷积输入（如 i/L、相对新鲜度 (k-1 - t_grid[i])/(k-1)，或正弦基）。这样可打破平移不变性，显式暴露位置/新旧程度/采样密度，有助于稳定地定位热点并提升后续扭曲采样效果。
